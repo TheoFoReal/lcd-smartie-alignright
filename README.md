@@ -1,7 +1,7 @@
 # lcd-smartie-alignright
 
 # Description:
-Ensures that the last character of a text string stays in place even if the string's character count changes. If the character count of a text string to its left changes, the gap between them lengthens or shortens accordingly so the right-aligned text doesn't move out of place.
+Ensures that the last character of a text string stays in place even if the string's character count changes. If the character count of a text string to its left [stringLeft] changes, the gap between them lengthens or shortens accordingly so the right-aligned text [stringRight] doesn't move out of place.
 
 # Formatting:
 $dll(AlignRight,1,[string],[right-most position]) **OR** $dll(AlignRight,1,[stringLeft]~[stringRight],[right-most position])
