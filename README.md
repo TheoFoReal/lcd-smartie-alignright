@@ -5,7 +5,7 @@ Ensures that the last character of a text string stays in place even if the stri
 
 # Formatting:
 $dll(AlignRight,1,[string],[right-most position])  
-**Or**  
+**or**  
 $dll(AlignRight,1,[stringLeft]~[stringRight],[right-most position])
 
 # Caveat:
