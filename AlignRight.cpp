@@ -32,25 +32,25 @@
 //     $dll(AlignRight,1,CPU: ~100%,20)
 //       ->  "CPU:           100%"
 //
-//   In both cases the '%' is in column 20, and "CPU: " is at the
-//   left. If <left> grows, the gap in the middle shrinks; if it grows
-//   past the space available, it is truncated from its right end so
-//   the value still fits.
+// CUSTOM CHARACTERS
+//   The plugin measures strings by DISPLAY COLUMNS, not bytes. A
+//   "$Chr(N)" sequence that LCD Smartie has not yet expanded is
+//   treated as one column, since it renders as one custom character.
+//   Any other byte counts as one column. This keeps alignment correct
+//   whether LCD Smartie expands $Chr(...) before or after the plugin.
 //
-//   IMPORTANT: because the plugin emits the entire line, the field
-//   containing the $dll(...) call must contain nothing else, and the
-//   screen's Centre0N and NoScroll0N settings should be 0 and 1
-//   respectively, so LCD Smartie passes the output through verbatim.
-//
-//   A literal '~' cannot appear in <left>. It is treated as the
-//   delimiter.
+//   LIMITATION: $Chr(0) produces a NUL byte when expanded. That
+//   terminates the C string, so anything after a $Chr(0) is lost
+//   before the plugin even sees it. This is a limitation of LCD
+//   Smartie's plugin API, not the plugin. If you need custom char 0
+//   in a string, use the byte value your display driver maps it to
+//   (for the default HD44780 driver this is $Chr(176)).
 //
 // Edge cases:
 //   - If `position` is <= 0, param1 is returned unchanged.
 //   - If `position` is omitted, it defaults to 20.
-//   - If `right` alone is longer than `position`, only its rightmost
-//     `position` characters are shown, so its last character still
-//     lands on the requested column.
+//   - If `right` alone is wider than `position`, only its rightmost
+//     `position` columns are shown.
 //   - An empty first parameter returns an empty string.
 //
 // The plugin is stateless. The result buffer is thread_local, so
@@ -72,6 +72,64 @@ static const char DELIMITER    = '~';
 // safely keep its own copy without any locking.
 // ---------------------------------------------------------------------------
 static thread_local char resultBuffer[MAX_OUTPUT];
+
+// ---------------------------------------------------------------------------
+// Column counter.
+//
+// Walks up to `maxBytes` bytes of `s`, counting:
+//   - a literal "$Chr(...)" sequence as 1 column
+//   - every other byte as 1 column
+//
+// This handles the common case where LCD Smartie has not yet expanded
+// $Chr(N) into a raw byte before calling the plugin. If the sequence
+// was already expanded, each raw byte is counted individually, which
+// is the same thing (1 byte = 1 column).
+//
+// Stops at a NUL byte or after `maxBytes`.
+// ---------------------------------------------------------------------------
+static int visual_width(const char* s, int maxBytes)
+{
+    int width = 0;
+    int i     = 0;
+
+    while (i < maxBytes && s[i] != '\0') {
+        // Detect "$Chr(" without reading past maxBytes.
+        if (s[i] == '$' && i + 5 <= maxBytes &&
+            s[i+1] == 'C' && s[i+2] == 'h' &&
+            s[i+3] == 'r' && s[i+4] == '(')
+        {
+            // Find the matching ')' within bounds.
+            int j = i + 5;
+            while (j < maxBytes && s[j] != '\0' && s[j] != ')') {
+                ++j;
+            }
+            if (j < maxBytes && s[j] == ')') {
+                width += 1;          // entire $Chr(...) = 1 column
+                i      = j + 1;
+                continue;
+            }
+            // Unterminated $Chr( — fall through and count bytes.
+        }
+        width += 1;
+        i     += 1;
+    }
+
+    return width;
+}
+
+// ---------------------------------------------------------------------------
+// Helper: byte-length of a C string, capped at a maximum.
+// Equivalent to strnlen, which MSVC does provide, but spelling it out
+// keeps the code portable and self-documenting.
+// ---------------------------------------------------------------------------
+static int bounded_strlen(const char* s, int maxBytes)
+{
+    int i = 0;
+    while (i < maxBytes && s[i] != '\0') {
+        ++i;
+    }
+    return i;
+}
 
 // ---------------------------------------------------------------------------
 // Plugin entry point
@@ -105,66 +163,65 @@ extern "C" __declspec(dllexport) char* __stdcall function1(char* param1, char* p
     // MODE 1 — no delimiter, right-align the whole string to `position`.
     // =====================================================================
     if (delim == NULL) {
-        int textLen = (int)strlen(param1);
-        if (textLen > MAX_OUTPUT - 1) textLen = MAX_OUTPUT - 1;
+        int textBytes = bounded_strlen(param1, MAX_OUTPUT - 1);
+        int textWidth = visual_width(param1, textBytes);
 
-        int padding = position - textLen;
-        if (padding < 0) padding = 0;    // overflow to the right
+        int padding = position - textWidth;
+        if (padding < 0) padding = 0;                        // overflow right
+        if (padding > MAX_OUTPUT - 1) padding = MAX_OUTPUT - 1;
+
+        // Trim the text if padding + text would overflow the buffer.
+        if (textBytes > MAX_OUTPUT - 1 - padding) {
+            textBytes = MAX_OUTPUT - 1 - padding;
+        }
 
         if (padding > 0) {
             memset(resultBuffer, ' ', padding);
         }
-        memcpy(resultBuffer + padding, param1, textLen);
-        resultBuffer[padding + textLen] = '\0';
+        memcpy(resultBuffer + padding, param1, textBytes);
+        resultBuffer[padding + textBytes] = '\0';
         return resultBuffer;
     }
 
     // =====================================================================
     // MODE 2 — split on the delimiter and pin the right side.
     // =====================================================================
-    const char* leftPtr  = param1;
-    int         leftLen  = (int)(delim - param1);
+    int leftBytes = (int)(delim - param1);
+    int leftWidth = visual_width(param1, leftBytes);
 
     const char* rightPtr = delim + 1;
-    int         rightLen = (int)strlen(rightPtr);
+    int rightBytes = bounded_strlen(rightPtr, MAX_OUTPUT - 1);
+    int rightWidth = visual_width(rightPtr, rightBytes);
 
-    // Safety caps for the buffer.
-    if (leftLen  > MAX_OUTPUT - 1) leftLen  = MAX_OUTPUT - 1;
-    if (rightLen > MAX_OUTPUT - 1) rightLen = MAX_OUTPUT - 1;
+    // Space available for the left text (in display columns).
+    int spaceForLeft = position - rightWidth;
+    if (spaceForLeft < 0) spaceForLeft = 0;
 
-    // If the right text alone does not fit, keep only its rightmost
-    // characters, so its last character still lands on `position`.
-    if (rightLen > position) {
-        rightPtr += (rightLen - position);
-        rightLen  = position;
-    }
-
-    // Space available for the left text.
-    int spaceForLeft = position - rightLen;
-
-    // If the left text is too long, keep its beginning (the start of
-    // the label) and drop the rest. This is the friendlier failure
-    // mode for a label followed by a value.
-    int useLeftLen = leftLen;
-    if (useLeftLen > spaceForLeft) useLeftLen = spaceForLeft;
-
-    int pad = spaceForLeft - useLeftLen;
+    int pad = spaceForLeft - leftWidth;
     if (pad < 0) pad = 0;
 
-    // --- Assemble: left, spaces, right ----------------------------------
+    // Safety: the assembled string must fit in the result buffer.
+    // If it would not, return param1 unchanged rather than truncating.
+    if (leftBytes + pad + rightBytes >= MAX_OUTPUT) {
+        strncpy(resultBuffer, param1, MAX_OUTPUT - 1);
+        resultBuffer[MAX_OUTPUT - 1] = '\0';
+        return resultBuffer;
+    }
+
+    // --- Assemble: left bytes, spaces, right bytes -----------------------
     int idx = 0;
 
-    if (useLeftLen > 0) {
-        memcpy(resultBuffer + idx, leftPtr, useLeftLen);
-        idx += useLeftLen;
+    if (leftBytes > 0) {
+        memcpy(resultBuffer + idx, param1, leftBytes);
+        idx += leftBytes;
     }
     if (pad > 0) {
         memset(resultBuffer + idx, ' ', pad);
         idx += pad;
     }
-    if (rightLen > 0) {
-        memcpy(resultBuffer + idx, rightPtr, rightLen);
-        idx += rightLen;
+    if (rightBytes > 0) {
+        memcpy(resultBuffer + idx, rightPtr, rightBytes);
+        idx += rightBytes;
     }
     resultBuffer[idx] = '\0';
 
