@@ -15,15 +15,31 @@
 //   $dll(AlignRight,1,CPU: 72%,20)   ->  "            CPU: 72%"
 //   $dll(AlignRight,1,CPU: 100%,20)  ->  "           CPU: 100%"
 //
-// In both cases the final character sits in column 20, so a value that
-// grows or shrinks by a digit does not shift the rest of the line around.
+// In both cases the final character sits in column 20 of the plugin's
+// own output, so a value that grows or shrinks by a digit does not shift
+// the string around.
+//
+// NOTE: the position refers to the plugin's output, not to the whole
+// screen field. If the field already contains literal text before the
+// $dll(...) call, that text occupies columns to the left of the plugin's
+// output, so the plugin's last character will not land on the same
+// column of the physical display that you passed as `position`.
+//
+// For example:
+//   CPU: $dll(AlignRight,1,$SysCPUUsage%,17)%
+//
+// produces 5 literal columns ("CPU: "), then the plugin's 17-column
+// output, then a literal "%". The plugin's last character sits at
+// column 22 of the field, and the "%" sits at column 23. If you want
+// the "%" to land on column 20, pass position=19.
 //
 // Edge cases:
 //   - If `position` is <= 0, the string is returned unchanged.
 //   - If `position` is omitted, it defaults to 20.
-//   - If the string is longer than `position`, only its rightmost
-//     `position` characters are shown, so the last character stays
-//     pinned at the requested column.
+//   - If the string is longer than `position`, it is returned as-is,
+//     overflowing to the right past the requested column. This means
+//     the "last character pinned to `position`" promise only holds when
+//     the string fits within `position`.
 //   - An empty or missing first parameter returns an empty string.
 //
 // The plugin is stateless. The result buffer is thread_local, so
@@ -40,10 +56,8 @@ static const int MAX_OUTPUT   = 512;
 static const int DEFAULT_POS  = 20;
 
 // ---------------------------------------------------------------------------
-// Thread-local result buffer. Because the function is pure (no shared
-// state), each thread can safely keep its own copy without any locking.
-// The buffer lives until the next call on the same thread, which is all
-// LCD Smartie needs.
+// Thread-local result buffer. The function is pure, so each thread can
+// safely keep its own copy without any locking.
 // ---------------------------------------------------------------------------
 static thread_local char resultBuffer[MAX_OUTPUT];
 
@@ -72,24 +86,22 @@ extern "C" __declspec(dllexport) char* __stdcall function1(char* param1, char* p
         return resultBuffer;
     }
 
-    // Clamp the position to something the buffer can actually hold.
+    // Clamp the position to something the buffer can hold.
     if (position >= MAX_OUTPUT) {
         position = MAX_OUTPUT - 1;
     }
 
-    int         textLen = (int)strlen(param1);
-    const char* text    = param1;
+    int textLen = (int)strlen(param1);
 
-    // If the text is longer than the requested position, keep only the
-    // rightmost `position` characters so the last character still lands
-    // on the requested column.
-    if (textLen > position) {
-        text    = param1 + (textLen - position);
-        textLen = position;
+    // If the source itself would overflow the result buffer, cap it so
+    // the memcpy below cannot write past the end.
+    if (textLen > MAX_OUTPUT - 1) {
+        textLen = MAX_OUTPUT - 1;
     }
 
-    // Number of leading spaces needed to push the last character to
-    // the requested column.
+    // Leading padding needed to land the last character on `position`.
+    // If the text is longer than `position`, padding is 0 and the text
+    // simply overflows to the right past `position`.
     int padding = position - textLen;
     if (padding < 0) {
         padding = 0;
@@ -99,16 +111,15 @@ extern "C" __declspec(dllexport) char* __stdcall function1(char* param1, char* p
     if (padding > 0) {
         memset(resultBuffer, ' ', padding);
     }
-    memcpy(resultBuffer + padding, text, textLen);
+    memcpy(resultBuffer + padding, param1, textLen);
     resultBuffer[padding + textLen] = '\0';
 
     return resultBuffer;
 }
 
 // ---------------------------------------------------------------------------
-// Lifecycle. The plugin has no persistent state, so there is nothing to
-// do in these hooks, but LCD Smartie looks for them and will complain in
-// its log if they are missing.
+// Lifecycle. The plugin has no persistent state, so these hooks are empty,
+// but LCD Smartie looks for them and will log a warning if they are missing.
 // ---------------------------------------------------------------------------
 extern "C" __declspec(dllexport) void __stdcall SmartieInit() {}
 extern "C" __declspec(dllexport) void __stdcall SmartieFini() {}
