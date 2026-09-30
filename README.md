@@ -9,4 +9,4 @@ $dll(AlignRight,1,[string],[right-most position])
 $dll(AlignRight,1,[stringLeft]~[stringRight],[right-most position])
 
 # Caveat:
-[string], [stringLeft], and [stringRight] will now display $Char(0) or anything following it. Other custom characters display normally.
+[string], [stringLeft], and [stringRight] will not display $Char(0) or anything following it. Other custom characters display normally.
